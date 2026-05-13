@@ -45,6 +45,10 @@ LOCAL_LIMA_BIN="$LOCAL_LIMA_ROOT/bin"
 RUNTIME_DIR="${PJARCZAK_MAC_RUNTIME_DIR:-$APP_SUPPORT_DIR/runtime}"
 mkdir -p "$APP_SUPPORT_DIR" "$LOCAL_LIMA_ROOT" "$RUNTIME_DIR"
 
+log() {
+    printf '[install_runtime_macos] %s\n' "$*" >&2
+}
+
 trim_file() {
     local path="$1"
     if [[ ! -f "$path" ]]; then
@@ -55,8 +59,7 @@ trim_file() {
 
 find_limactl() {
     if [[ -n "${PJARCZAK_LIMACTL:-}" && -x "${PJARCZAK_LIMACTL}" ]]; then
-        printf '%s
-' "$PJARCZAK_LIMACTL"
+        printf '%s\n' "$PJARCZAK_LIMACTL"
         return 0
     fi
     if command -v limactl >/dev/null 2>&1; then
@@ -64,14 +67,12 @@ find_limactl() {
         return 0
     fi
     if [[ -x "$LOCAL_LIMA_BIN/limactl" ]]; then
-        printf '%s
-' "$LOCAL_LIMA_BIN/limactl"
+        printf '%s\n' "$LOCAL_LIMA_BIN/limactl"
         return 0
     fi
     for candidate in /opt/homebrew/bin/limactl /usr/local/bin/limactl; do
         if [[ -x "$candidate" ]]; then
-            printf '%s
-' "$candidate"
+            printf '%s\n' "$candidate"
             return 0
         fi
     done
@@ -83,8 +84,7 @@ resolve_lima_version_from_redirect() {
     effective_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/lima-vm/lima/releases/latest || true)
     case "$effective_url" in
         */tag/*)
-            printf '%s
-' "${effective_url##*/}"
+            printf '%s\n' "${effective_url##*/}"
             return 0
             ;;
     esac
@@ -93,16 +93,14 @@ resolve_lima_version_from_redirect() {
 
 resolve_lima_version() {
     if [[ -n "${PJARCZAK_LIMA_VERSION:-}" ]]; then
-        printf '%s
-' "$PJARCZAK_LIMA_VERSION"
+        printf '%s\n' "$PJARCZAK_LIMA_VERSION"
         return 0
     fi
 
     local version=""
     version=$(curl -fsSL https://api.github.com/repos/lima-vm/lima/releases/latest | awk -F'"' '/"tag_name"[[:space:]]*:/ { print $4; exit }' || true)
     if [[ -n "$version" ]]; then
-        printf '%s
-' "$version"
+        printf '%s\n' "$version"
         return 0
     fi
 
@@ -140,6 +138,7 @@ install_lima_binary_locally() {
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' RETURN
 
+    log "downloading Lima ${version} (${host_arch})"
     curl -fL --retry 3 --retry-delay 2 "$base_url/$main_archive" -o "$tmpdir/$main_archive"
     tar -xzf "$tmpdir/$main_archive" -C "$LOCAL_LIMA_ROOT"
 
@@ -153,10 +152,12 @@ install_lima_binary_locally() {
 ensure_lima_installed() {
     LIMACTL=$(find_limactl || true)
     if [[ -n "$LIMACTL" ]]; then
+        log "using existing limactl: $LIMACTL"
         return 0
     fi
 
     if command -v brew >/dev/null 2>&1; then
+        log "installing Lima via Homebrew"
         brew install lima
         LIMACTL=$(find_limactl || true)
         if [[ -n "$LIMACTL" ]]; then
@@ -176,6 +177,7 @@ maybe_install_rosetta() {
     if pgrep -q oahd >/dev/null 2>&1; then
         return 0
     fi
+    log "installing Rosetta 2 (required to run x86_64 linux binaries on arm64)"
     /usr/sbin/softwareupdate --install-rosetta --agree-to-license >/dev/null 2>&1 || true
 }
 
@@ -207,39 +209,95 @@ copy_runtime_payload() {
         fi
     done
 
+    # Mirror the Lima instance descriptor and helper scripts into the runtime
+    # dir so the host wrapper can resolve the instance name even when the
+    # bridge dylib invokes it without a PJARCZAK_MAC_LIMA_INSTANCE env var.
+    for file in pjarczak_lima_instance.txt linux_payload_manifest.json; do
+        if [[ -f "$src_dir/$file" ]]; then
+            cp -f "$src_dir/$file" "$dst_dir/$file"
+        fi
+    done
+
     chmod 755 "$dst_dir/pjarczak_bambu_linux_host" "$dst_dir/pjarczak_bambu_linux_host_abi1" "$dst_dir/pjarczak_bambu_linux_host_abi0"
 }
 
-INSTANCE="${PJARCZAK_MAC_LIMA_INSTANCE:-}"
-if [[ -z "$INSTANCE" ]]; then
-    INSTANCE=$(trim_file "$PLUGIN_DIR/pjarczak_lima_instance.txt" || true)
-fi
-if [[ -z "$INSTANCE" ]]; then
-    INSTANCE="orcaslicer-bambu-network"
-fi
+resolve_instance_name() {
+    if [[ -n "${PJARCZAK_MAC_LIMA_INSTANCE:-}" ]]; then
+        printf '%s\n' "$PJARCZAK_MAC_LIMA_INSTANCE"
+        return 0
+    fi
+
+    local candidate
+    for candidate in "$PLUGIN_DIR/pjarczak_lima_instance.txt" "$RUNTIME_DIR/pjarczak_lima_instance.txt"; do
+        local value
+        value=$(trim_file "$candidate" 2>/dev/null || true)
+        if [[ -n "$value" ]]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done
+
+    printf '%s\n' "orcaslicer-bambu-network"
+}
+
+instance_exists() {
+    "$LIMACTL" list --format='{{.Name}}' 2>/dev/null | grep -qx "$INSTANCE"
+}
+
+instance_reachable() {
+    "$LIMACTL" shell "$INSTANCE" -- /usr/bin/env true >/dev/null 2>&1
+}
+
+start_or_create_instance() {
+    local -a start_args=(start "--name=${INSTANCE}" --tty=false --mount-writable)
+    local macos_major
+    macos_major=$(sw_vers -productVersion | awk -F. '{print $1}')
+    if [[ "${macos_major:-0}" -ge 13 ]]; then
+        start_args+=(--vm-type=vz --network=vzNAT)
+        if [[ "$(uname -m)" == "arm64" ]]; then
+            start_args+=(--rosetta)
+        fi
+    fi
+
+    if instance_exists; then
+        log "starting existing Lima instance '$INSTANCE'"
+        "$LIMACTL" start "$INSTANCE" >/dev/null
+    else
+        log "creating new Lima instance '$INSTANCE' from template:default"
+        "$LIMACTL" "${start_args[@]}" template://default
+    fi
+}
+
+INSTANCE=$(resolve_instance_name)
+log "lima instance: $INSTANCE"
+log "runtime dir:   $RUNTIME_DIR"
+log "plugin dir:    $PLUGIN_DIR"
 
 copy_runtime_payload "$PLUGIN_DIR" "$RUNTIME_DIR"
 ensure_lima_installed
 maybe_install_rosetta
 
-START_ARGS=(start "--name=${INSTANCE}" --tty=false --mount-writable)
-MACOS_MAJOR=$(sw_vers -productVersion | awk -F. '{print $1}')
-if [[ "$MACOS_MAJOR" -ge 13 ]]; then
-    START_ARGS+=(--vm-type=vz --network=vzNAT)
-    if [[ "$(uname -m)" == "arm64" ]]; then
-        START_ARGS+=(--rosetta)
-    fi
+if [[ "$REPLACE_EXISTING" -eq 1 ]] && instance_exists; then
+    log "stopping and removing existing instance for clean reinstall"
+    "$LIMACTL" stop --force "$INSTANCE" >/dev/null 2>&1 || true
+    "$LIMACTL" delete "$INSTANCE" >/dev/null 2>&1 || true
 fi
 
-if [[ "$REPLACE_EXISTING" -eq 1 ]]; then
-    "$LIMACTL" stop "$INSTANCE" >/dev/null 2>&1 || true
-fi
-
-if ! "$LIMACTL" shell "$INSTANCE" -- /usr/bin/env true >/dev/null 2>&1; then
-    "$LIMACTL" "${START_ARGS[@]}" template:default
+if ! instance_reachable; then
+    start_or_create_instance
 fi
 
 "$LIMACTL" start-at-login "$INSTANCE" --enabled >/dev/null 2>&1 || true
-"$LIMACTL" shell "$INSTANCE" -- /usr/bin/env true >/dev/null
-printf 'runtime installed
-'
+
+if ! instance_reachable; then
+    log "Lima instance did not come up after start; check 'limactl list' and logs in ~/.lima/$INSTANCE/" >&2
+    exit 1
+fi
+
+log "verifying linux host binary is executable inside the VM"
+if ! "$LIMACTL" shell "$INSTANCE" -- test -x "$RUNTIME_DIR/pjarczak_bambu_linux_host"; then
+    log "linux host binary not visible inside the VM; ensure $HOME is mounted (Lima default template mounts the user home)" >&2
+    exit 1
+fi
+
+printf 'runtime installed\n'

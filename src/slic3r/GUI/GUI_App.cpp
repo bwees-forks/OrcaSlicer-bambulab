@@ -3348,8 +3348,12 @@ static void pjarczak_verify_or_install_macos_bridge_runtime(const boost::filesys
     if (prompt.ShowModal() != wxID_YES)
         return;
 
+    // Skip -ReplaceExisting on first repair attempts: install_runtime_macos.sh
+    // is idempotent (start existing instance, copy missing files). Forcing a
+    // full reinstall on every verify failure would needlessly tear down a
+    // healthy Lima VM when the only thing missing was a runtime payload file.
     const wxString install_cmd = wxString::Format(
-        "/bin/bash %s -PackageDir %s -PluginDir %s -PluginCacheDir %s -ReplaceExisting",
+        "/bin/bash %s -PackageDir %s -PluginDir %s -PluginCacheDir %s",
         pjarczak_quote_posix_arg(from_u8(install_script.string())),
         pjarczak_quote_posix_arg(plugin_dir_wx),
         pjarczak_quote_posix_arg(plugin_dir_wx),

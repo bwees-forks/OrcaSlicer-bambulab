@@ -186,6 +186,8 @@ copy_linux_bridge_runtime_to_app() {
     fi
 
     chmod +x "$macos_dir/pjarczak_bambu_linux_host"
+    chmod +x "$macos_dir/pjarczak_bambu_linux_host_abi1"
+    chmod +x "$macos_dir/pjarczak_bambu_linux_host_abi0"
     chmod +x "$macos_dir/pjarczak-bambu-linux-host-wrapper"
     chmod +x "$macos_dir/install_runtime_macos.sh"
     chmod +x "$macos_dir/verify_runtime_macos.sh"

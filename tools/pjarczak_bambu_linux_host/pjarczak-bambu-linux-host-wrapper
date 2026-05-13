@@ -8,8 +8,7 @@ if [ -z "$HOST_PATH" ]; then
 fi
 
 runtime_dir_default() {
-    printf '%s
-' "$HOME/Library/Application Support/OrcaSlicer/macos-bridge/runtime"
+    printf '%s\n' "$HOME/Library/Application Support/OrcaSlicer/macos-bridge/runtime"
 }
 
 PLUGIN_DIR="${PJARCZAK_BAMBU_PLUGIN_DIR:-}"
@@ -27,7 +26,19 @@ trim_file() {
 
 INSTANCE="${PJARCZAK_MAC_LIMA_INSTANCE:-}"
 if [ -z "$INSTANCE" ]; then
-    INSTANCE=$(trim_file "$PLUGIN_DIR/pjarczak_lima_instance.txt" || true)
+    # Search the runtime dir first (preferred) then the original plugin dir
+    # (where install_runtime_macos.sh placed the file before copying it into
+    # the runtime dir), then the app-support bridge dir as a last resort.
+    for candidate_dir in \
+        "$PLUGIN_DIR" \
+        "${PJARCZAK_MAC_PLUGIN_DIR:-}" \
+        "$HOME/Library/Application Support/OrcaSlicer/macos-bridge" \
+        "$HOME/Library/Application Support/OrcaSlicer/macos-bridge/runtime"
+    do
+        [ -n "$candidate_dir" ] || continue
+        INSTANCE=$(trim_file "$candidate_dir/pjarczak_lima_instance.txt" 2>/dev/null || true)
+        [ -n "$INSTANCE" ] && break
+    done
 fi
 if [ -z "$INSTANCE" ]; then
     INSTANCE="orcaslicer-bambu-network"
@@ -60,14 +71,37 @@ find_limactl() {
 
 LIMACTL=$(find_limactl || true)
 if [ -z "$LIMACTL" ]; then
-    echo "limactl not found" >&2
+    echo "limactl not found; install Lima or run install_runtime_macos.sh" >&2
     exit 127
 fi
 
+instance_exists() {
+    "$LIMACTL" list --format='{{.Name}}' 2>/dev/null | grep -qx "$INSTANCE"
+}
+
+instance_reachable() {
+    "$LIMACTL" shell "$INSTANCE" -- /usr/bin/env true >/dev/null 2>&1
+}
+
+if ! instance_reachable; then
+    if instance_exists; then
+        # Instance exists but is stopped — try to start it once before giving up.
+        "$LIMACTL" start "$INSTANCE" >/dev/null 2>&1 || true
+    fi
+    if ! instance_reachable; then
+        echo "Lima instance '$INSTANCE' is not reachable; run install_runtime_macos.sh" >&2
+        exit 127
+    fi
+fi
+
+# Lima already shellescape.Quote()s every positional argument before joining
+# them and wrapping them with `bash -c`, so passing the env=value pairs and the
+# host binary path as separate arguments is safe even when the paths contain
+# spaces (e.g. "Application Support").
 exec "$LIMACTL" shell "$INSTANCE" -- /usr/bin/env \
     PJARCZAK_BAMBU_PLUGIN_DIR="$PLUGIN_DIR" \
-    PJARCZAK_BAMBU_NETWORK_SO="$PLUGIN_DIR/libbambu_networking.so" \
-    PJARCZAK_BAMBU_SOURCE_SO="$PLUGIN_DIR/libBambuSource.so" \
-    PJARCZAK_BAMBU_LIVE555_SO="$PLUGIN_DIR/liblive555.so" \
+    PJARCZAK_BAMBU_NETWORK_SO="${PJARCZAK_BAMBU_NETWORK_SO:-$PLUGIN_DIR/libbambu_networking.so}" \
+    PJARCZAK_BAMBU_SOURCE_SO="${PJARCZAK_BAMBU_SOURCE_SO:-$PLUGIN_DIR/libBambuSource.so}" \
+    PJARCZAK_BAMBU_LIVE555_SO="${PJARCZAK_BAMBU_LIVE555_SO:-$PLUGIN_DIR/liblive555.so}" \
     PJARCZAK_EXPECTED_BAMBU_NETWORK_VERSION="${PJARCZAK_EXPECTED_BAMBU_NETWORK_VERSION:-}" \
     "$HOST_PATH"

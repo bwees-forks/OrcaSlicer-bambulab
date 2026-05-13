@@ -113,15 +113,18 @@ if (APPLE)
             ${PJARCZAK_MAC_INSTANCE_SOURCE}
             $<TARGET_FILE_DIR:pjarczak_bambu_networking_bridge>/pjarczak_lima_instance.txt
     )
-    install(FILES ${PJARCZAK_MAC_WRAPPER_SCRIPT_SOURCE}
+    # Use install(PROGRAMS) for shell scripts so the executable bit is preserved
+    # in the bundle. install(FILES) defaults to 644 which would break direct
+    # execv of the wrapper from boost::process inside the bridge dylib.
+    install(PROGRAMS ${PJARCZAK_MAC_WRAPPER_SCRIPT_SOURCE}
         DESTINATION "."
         RENAME pjarczak-bambu-linux-host-wrapper
     )
-    install(FILES ${PJARCZAK_MAC_INSTALLER_SOURCE}
+    install(PROGRAMS ${PJARCZAK_MAC_INSTALLER_SOURCE}
         DESTINATION "."
         RENAME install_runtime_macos.sh
     )
-    install(FILES ${PJARCZAK_MAC_VERIFY_SOURCE}
+    install(PROGRAMS ${PJARCZAK_MAC_VERIFY_SOURCE}
         DESTINATION "."
         RENAME verify_runtime_macos.sh
     )
@@ -162,8 +165,11 @@ if (WIN32)
             ${PJARCZAK_PLUGIN_CACHE_SUBDIR_SOURCE}
             $<TARGET_FILE_DIR:pjarczak_bambu_networking_bridge>/pjarczak_plugin_cache_subdir.txt
     )
-    install(FILES
+    install(PROGRAMS
         ${PJARCZAK_WSL_HELPER_SOURCE}
+        DESTINATION "."
+    )
+    install(FILES
         ${PJARCZAK_WSL_INSTALLER_SOURCE}
         ${PJARCZAK_WSL_INSTALLER_CMD_SOURCE}
         ${PJARCZAK_WSL_VERIFY_SOURCE}

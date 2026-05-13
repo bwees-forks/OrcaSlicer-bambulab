@@ -47,13 +47,12 @@ trim_file() {
     if [[ ! -f "$path" ]]; then
         return 1
     fi
-    LC_ALL=C tr -d '' < "$path" | head -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+    LC_ALL=C tr -d '\r' < "$path" | head -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 find_limactl() {
     if [[ -n "${PJARCZAK_LIMACTL:-}" && -x "${PJARCZAK_LIMACTL}" ]]; then
-        printf '%s
-' "$PJARCZAK_LIMACTL"
+        printf '%s\n' "$PJARCZAK_LIMACTL"
         return 0
     fi
     if command -v limactl >/dev/null 2>&1; then
@@ -62,14 +61,12 @@ find_limactl() {
     fi
     local local_bin="$APP_SUPPORT_DIR/lima/bin/limactl"
     if [[ -x "$local_bin" ]]; then
-        printf '%s
-' "$local_bin"
+        printf '%s\n' "$local_bin"
         return 0
     fi
     for candidate in /opt/homebrew/bin/limactl /usr/local/bin/limactl; do
         if [[ -x "$candidate" ]]; then
-            printf '%s
-' "$candidate"
+            printf '%s\n' "$candidate"
             return 0
         fi
     done
@@ -146,7 +143,10 @@ fi
 
 INSTANCE="${PJARCZAK_MAC_LIMA_INSTANCE:-}"
 if [[ -z "$INSTANCE" ]]; then
-    INSTANCE=$(trim_file "$PLUGIN_DIR/pjarczak_lima_instance.txt" || true)
+    for candidate in "$PLUGIN_DIR/pjarczak_lima_instance.txt" "$RUNTIME_DIR/pjarczak_lima_instance.txt"; do
+        INSTANCE=$(trim_file "$candidate" 2>/dev/null || true)
+        [[ -n "$INSTANCE" ]] && break
+    done
 fi
 if [[ -z "$INSTANCE" ]]; then
     echo "Lima instance name is not configured" >&2
@@ -158,5 +158,12 @@ if ! "$LIMACTL" shell "$INSTANCE" -- /usr/bin/env true >/dev/null 2>&1; then
     exit 1
 fi
 
-printf 'runtime ok
-'
+# Final sanity check: the runtime payload must be visible from inside the VM.
+# Lima's default template mounts the host home into the guest at the same path,
+# so paths like ~/Library/Application Support/... resolve identically inside.
+if ! "$LIMACTL" shell "$INSTANCE" -- test -x "$RUNTIME_DIR/pjarczak_bambu_linux_host"; then
+    echo "linux host binary not accessible from inside Lima at $RUNTIME_DIR/pjarczak_bambu_linux_host" >&2
+    exit 1
+fi
+
+printf 'runtime ok\n'

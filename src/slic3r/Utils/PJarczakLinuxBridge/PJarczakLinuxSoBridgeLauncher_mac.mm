@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <sys/stat.h>
 
 namespace Slic3r::PJarczakLinuxBridge {
 
@@ -101,12 +102,25 @@ std::filesystem::path runtime_dir()
     return std::filesystem::path(home) / "Library" / "Application Support" / "OrcaSlicer" / "macos-bridge" / "runtime";
 }
 
-std::string configured_instance_name(const std::filesystem::path& plugin_dir)
+std::string configured_instance_name(const std::filesystem::path& plugin_dir,
+                                     const std::filesystem::path& runtime_dir_path)
 {
     const auto env_value = required_env("PJARCZAK_MAC_LIMA_INSTANCE");
     if (!env_value.empty())
         return env_value;
-    return read_text_file_trimmed(plugin_dir / mac_lima_instance_file_name());
+
+    const std::filesystem::path candidates[] = {
+        plugin_dir / mac_lima_instance_file_name(),
+        runtime_dir_path / mac_lima_instance_file_name(),
+    };
+    for (const auto& candidate : candidates) {
+        if (candidate.empty())
+            continue;
+        const auto value = read_text_file_trimmed(candidate);
+        if (!value.empty())
+            return value;
+    }
+    return {};
 }
 
 std::string first_missing_runtime_file(const std::filesystem::path& plugin_dir,
@@ -145,6 +159,54 @@ std::string first_missing_runtime_file(const std::filesystem::path& plugin_dir,
     return {};
 }
 
+bool ensure_executable(const std::filesystem::path& path)
+{
+    if (path.empty() || !std::filesystem::exists(path))
+        return false;
+
+    struct stat st {};
+    if (::stat(path.c_str(), &st) != 0)
+        return false;
+
+    const mode_t exec_bits = S_IXUSR | S_IXGRP | S_IXOTH;
+    if ((st.st_mode & exec_bits) == exec_bits)
+        return true;
+
+    return ::chmod(path.c_str(), st.st_mode | exec_bits) == 0;
+}
+
+std::string augmented_path_value()
+{
+    // boost::process inherits the current process PATH. On macOS GUI apps
+    // launched from Finder, PATH does not include Homebrew (`/opt/homebrew/bin`
+    // on Apple Silicon, `/usr/local/bin` on Intel) where `limactl` typically
+    // lives. Prepend the well-known Lima locations so the wrapper's
+    // `command -v limactl` finds it.
+    std::string value;
+    if (const char* current = std::getenv("PATH"))
+        value = current;
+
+    const std::string lima_paths[] = {
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    };
+
+    std::string prefix;
+    for (const auto& candidate : lima_paths) {
+        if (value.find(candidate) == std::string::npos) {
+            if (!prefix.empty())
+                prefix.push_back(':');
+            prefix += candidate;
+        }
+    }
+
+    if (prefix.empty())
+        return value;
+    if (value.empty())
+        return prefix;
+    return prefix + ":" + value;
+}
+
 bool probe_runtime_ready(const std::filesystem::path& plugin_dir, std::string* reason)
 {
     const auto verify_script = plugin_dir / mac_runtime_verify_script_file_name();
@@ -154,8 +216,12 @@ bool probe_runtime_ready(const std::filesystem::path& plugin_dir, std::string* r
         return false;
     }
 
+    // Make sure boost::process / popen can actually execute the script.
+    ensure_executable(verify_script);
+
     const std::string command =
-        std::string("/bin/bash ") + shell_quote(verify_script.string()) +
+        std::string("PATH=") + shell_quote(augmented_path_value()) +
+        " /bin/bash " + shell_quote(verify_script.string()) +
         " -PackageDir " + shell_quote(plugin_dir.string()) +
         " -PluginDir " + shell_quote(plugin_dir.string());
 
@@ -207,7 +273,7 @@ std::string launch_preflight_error()
     if (!missing_file.empty())
         return "required macOS runtime file missing: " + missing_file;
 
-    const auto instance = configured_instance_name(plugin_dir);
+    const auto instance = configured_instance_name(plugin_dir, runtime_dir_path);
     if (instance.empty())
         return "PJARCZAK_MAC_LIMA_INSTANCE is not set and pjarczak_lima_instance.txt is missing or empty";
 
@@ -229,7 +295,7 @@ LaunchSpec build_default_launch_spec()
     if (!missing_file.empty())
         return error_launch_spec("required macOS runtime file missing: " + missing_file);
 
-    const auto instance = configured_instance_name(plugin_dir);
+    const auto instance = configured_instance_name(plugin_dir, runtime_dir_path);
     if (instance.empty())
         return error_launch_spec("PJARCZAK_MAC_LIMA_INSTANCE is not set and pjarczak_lima_instance.txt is missing or empty");
 
@@ -240,6 +306,12 @@ LaunchSpec build_default_launch_spec()
     const std::filesystem::path wrapper_path = plugin_dir / mac_host_wrapper_file_name();
     const std::filesystem::path host_path = runtime_dir_path / host_executable_file_name();
 
+    // The wrapper is launched directly via boost::process / execv on macOS, so
+    // it must be marked executable. The bundle install / OTA copy paths set
+    // this already, but flip it on defensively in case a stale copy with 644
+    // perms slips through.
+    ensure_executable(wrapper_path);
+
     LaunchSpec spec;
     spec.description = "macOS via Lima linux guest";
     spec.argv = {wrapper_path.string(), host_path.string()};
@@ -249,7 +321,9 @@ LaunchSpec build_default_launch_spec()
         {"PJARCZAK_BAMBU_SOURCE_SO", (runtime_dir_path / linux_source_library_name()).string()},
         {"PJARCZAK_BAMBU_REQUIRE_LINUX_GUEST", "1"},
         {"PJARCZAK_MAC_RUNTIME_DIR", runtime_dir_path.string()},
-        {"PJARCZAK_MAC_LIMA_INSTANCE", instance}
+        {"PJARCZAK_MAC_PLUGIN_DIR", plugin_dir.string()},
+        {"PJARCZAK_MAC_LIMA_INSTANCE", instance},
+        {"PATH", augmented_path_value()},
     };
     return spec;
 }

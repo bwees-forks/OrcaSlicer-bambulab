@@ -300,4 +300,31 @@ if ! "$LIMACTL" shell "$INSTANCE" -- test -x "$RUNTIME_DIR/pjarczak_bambu_linux_
     exit 1
 fi
 
+# The bundled linux host and .so files are x86_64. On Apple Silicon the VM is
+# arm64 with Rosetta 2 registered for x86_64 binfmt, but Rosetta only handles
+# instruction translation — the VM still needs an x86_64 dynamic linker
+# (/lib64/ld-linux-x86-64.so.2) and basic userland libraries to actually load
+# the binary. Provision them now, idempotently, so the host is loadable on
+# first run. On x86_64 Macs (vm-type=vz, native x86_64 Ubuntu) these are
+# already present, but `dpkg --add-architecture amd64` is a no-op there.
+if [[ "$(uname -m)" == "arm64" ]]; then
+    log "provisioning x86_64 multiarch runtime inside Lima (one-time)"
+    PROBE_LD_PATH='/lib64/ld-linux-x86-64.so.2'
+    if ! "$LIMACTL" shell "$INSTANCE" -- test -e "$PROBE_LD_PATH" >/dev/null 2>&1; then
+        if ! "$LIMACTL" shell "$INSTANCE" -- sudo /bin/bash -c '
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            dpkg --add-architecture amd64
+            apt-get update -qq
+            apt-get install -y --no-install-recommends \
+                libc6:amd64 libstdc++6:amd64 libssl3:amd64 libcurl4:amd64 \
+                zlib1g:amd64 libgcc-s1:amd64
+        ' >&2; then
+            log "WARNING: x86_64 multiarch provisioning failed; linux host may fail to load" >&2
+        fi
+    else
+        log "x86_64 dynamic linker already present in VM"
+    fi
+fi
+
 printf 'runtime installed\n'

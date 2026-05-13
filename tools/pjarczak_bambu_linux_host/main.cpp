@@ -58,6 +58,17 @@ int main(int argc, char** argv)
     if (argc > 1 && std::string(argv[1]) == "--probe-auth")
         return run_probe_auth();
 
+    if (argc > 1 && std::string(argv[1]) == "--print-handshake") {
+        // Diagnostic: run the same init the RPC server does (LinuxPluginHost
+        // ctor calls load_modules()) and dump the handshake JSON so the user
+        // can see exactly why network_loaded/source_loaded is false (status
+        // strings expose dlopen errors, manifest mismatches, ABI mismatches).
+        LinuxPluginHost host;
+        auto hs = host.handle("bridge.handshake", nlohmann::json::object());
+        std::cout << hs.dump(2) << std::endl;
+        return 0;
+    }
+
     const int rpc_fd = ::dup(STDOUT_FILENO);
     if (rpc_fd < 0)
         return 100;

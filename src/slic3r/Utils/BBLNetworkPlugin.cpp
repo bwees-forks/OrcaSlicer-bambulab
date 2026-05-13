@@ -297,9 +297,25 @@ int BBLNetworkPlugin::initialize(bool using_backup, const std::string& version)
         << ", start_local_print=" << (m_start_local_print ? "loaded" : "null");
 
     if (pj_bridge && loaded_version.empty()) {
+        // bridge_reported_version() stashes the real reason (network_status,
+        // source_status, dlopen errors from inside Lima/WSL) in the bridge
+        // dylib's g_last_error. Pull it through so the user sees the actual
+        // failure instead of the generic "did not return a version".
+        std::string bridge_detail;
+        using func_get_last_error_msg = const char* (*)();
+        auto get_last_error = reinterpret_cast<func_get_last_error_msg>(get_function("bambu_network_get_last_error_msg"));
+        if (get_last_error) {
+            if (const char* msg = get_last_error())
+                bridge_detail = msg;
+        }
+
+        std::string technical_details = "Bridge module loaded, but the linux payload handshake did not return a version";
+        if (!bridge_detail.empty())
+            technical_details += " (" + bridge_detail + ")";
+
         set_load_error(
             "Linux bridge payload not ready",
-            "Bridge module loaded, but the linux payload handshake did not return a version",
+            technical_details,
             library
         );
         unload();

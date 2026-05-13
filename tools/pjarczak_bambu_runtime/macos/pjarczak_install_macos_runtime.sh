@@ -311,14 +311,42 @@ if [[ "$(uname -m)" == "arm64" ]]; then
     log "provisioning x86_64 multiarch runtime inside Lima (one-time)"
     PROBE_LD_PATH='/lib64/ld-linux-x86-64.so.2'
     if ! "$LIMACTL" shell "$INSTANCE" -- test -e "$PROBE_LD_PATH" >/dev/null 2>&1; then
+        # Stock arm64 Ubuntu sources point at ports.ubuntu.com which has no
+        # amd64 packages — apt 404s on every amd64 fetch. Add archive.ubuntu.com
+        # as an amd64-only source and pin the existing sources to arm64 first.
         if ! "$LIMACTL" shell "$INSTANCE" -- sudo /bin/bash -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
+            . /etc/os-release
+            CN="${UBUNTU_CODENAME:-noble}"
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ] && ! grep -q "^Architectures:" /etc/apt/sources.list.d/ubuntu.sources; then
+                sed -i "/^Types:/a Architectures: arm64" /etc/apt/sources.list.d/ubuntu.sources
+            fi
+            cat > /etc/apt/sources.list.d/orca-amd64.sources <<EOF
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: ${CN} ${CN}-updates ${CN}-backports
+Components: main restricted universe multiverse
+Architectures: amd64
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+            cat > /etc/apt/sources.list.d/orca-amd64-security.sources <<EOF
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu/
+Suites: ${CN}-security
+Components: main restricted universe multiverse
+Architectures: amd64
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
             dpkg --add-architecture amd64
             apt-get update -qq
+            # Try the t64 names first (Ubuntu 24.04+); fall back to legacy names.
             apt-get install -y --no-install-recommends \
-                libc6:amd64 libstdc++6:amd64 libssl3:amd64 libcurl4:amd64 \
-                zlib1g:amd64 libgcc-s1:amd64
+                libc6:amd64 libstdc++6:amd64 zlib1g:amd64 \
+                libssl3t64:amd64 libcurl4t64:amd64 \
+              || apt-get install -y --no-install-recommends \
+                libc6:amd64 libstdc++6:amd64 zlib1g:amd64 \
+                libssl3:amd64 libcurl4:amd64
         ' >&2; then
             log "WARNING: x86_64 multiarch provisioning failed; linux host may fail to load" >&2
         fi
